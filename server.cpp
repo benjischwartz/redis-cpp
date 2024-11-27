@@ -1,6 +1,7 @@
 #include <iostream>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 
 void die(const std::string& s) {
@@ -40,6 +41,12 @@ int main() {
     if (rv) {
         die("listen()");
     }
+
+    // Print out server's port
+    struct sockaddr_in a;
+    socklen_t len = sizeof(a);
+    getsockname(fd, (sockaddr *)&a, &len);
+    printf("Server address: %s.%d\n", inet_ntoa (a.sin_addr), htons(a.sin_port));
 
     // accept connections
     while (true) {
