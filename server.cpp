@@ -1,8 +1,12 @@
+#include "utils.h"
+
+#include <poll.h>
+#include <cstdint>
+#include <vector>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-#include "utils.h"
 
 static int32_t one_request(int connfd)
 {
@@ -43,6 +47,40 @@ static int32_t one_request(int connfd)
     return write_all(connfd, wbuf, 4 + len);
 }
 
+static void conn_put(std::vector<Conn *> &fd2conn, struct Conn *conn) {
+    if (fd2conn.size() <= (size_t)conn->fd) {
+        fd2conn.resize(conn->fd + 1);
+    }
+    fd2conn[conn->fd] = conn;
+}
+
+static int32_t accept_new_conn(std::vector<Conn *> &fd2conn, int fd) {
+    // accept
+    struct sockaddr_in client_addr = {};
+    socklen_t socklen = sizeof(client_addr);
+    int connfd = accept(fd, (struct sockaddr *)&client_addr, &socklen);
+    if (connfd < 0) {
+        std::cout << "accept() error\n";
+        return -1;
+    }
+
+    // set new connection fd to non-blocking
+    fd_set_nb(connfd);
+    // create Conn struct for new connection fd 
+    struct Conn *conn = (struct Conn *)malloc(sizeof(struct Conn));
+    if (!conn) {
+        close(connfd);
+        return -1;
+    }
+    conn->fd = connfd;
+    conn->state = STATE_REQ;
+    conn->rbuf_size = 0;
+    conn->wbuf_size = 0;
+    conn->wbuf_sent = 0;
+    conn_put(fd2conn, conn);
+    return 0;
+}
+
 int main()
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -72,21 +110,55 @@ int main()
     getsockname(fd, (sockaddr *)&a, &len);
     printf("Server address: %s.%d\n", inet_ntoa(a.sin_addr), htons(a.sin_port));
 
-    // accept connections
+    // map of client connections, keyed by fd
+    std::vector<Conn *> fd2conn;
+
+    // set listen fd to nonblocking mode
+    fd_set_nb(fd);
+
+    // the event loop
+    std::vector<struct pollfd> poll_args;
     while (true) {
-        struct sockaddr_in client_addr = {};
-        socklen_t addrlen = sizeof(client_addr);
-        int connfd = accept(fd, (struct sockaddr *)&client_addr, &addrlen);
-        if (connfd < 0) {
-            continue;  // error
+        // reset arguments of poll()
+        poll_args.clear();
+        // listening fd is first
+        struct pollfd pfd = {fd, POLLIN, 0};
+        poll_args.push_back(pfd);
+        for (Conn *conn : fd2conn) {
+            if (!conn) {
+                continue;
+            }
+            // For each fd connection, create the relevant poll() arg
+            struct pollfd pfd = {};
+            pfd.fd = conn->fd;
+            pfd.events = (conn->state == STATE_REQ) ? POLLIN : POLLOUT;
+            pfd.events = pfd.events | POLLERR;
+            poll_args.push_back(pfd);
         }
-        // only serve one client connection at once
-        while (true) {
-            int32_t err = one_request(connfd);
-            if (err) {
-                break;
+        // poll for active fds 
+        int rv = poll(poll_args.data(), (nfds_t)poll_args.size(), 1000);
+        if (rv < 0) {
+            die("poll()");
+        }
+
+        // process active connections (skip the first listening fd)
+        for (size_t i = 1; i < poll_args.size(); ++i) {
+            if (poll_args[i].revents) {
+                Conn *conn = fd2conn[poll_args[i].fd];
+                connection_io(conn);
+                if (conn->state == STATE_END) {
+                    // client closed normally, or something bad
+                    // destroy connection
+                    fd2conn[conn->fd] = NULL;
+                    (void)close(conn->fd);
+                    free(conn);
+                }
             }
         }
-        close(connfd);
+
+        if (poll_args[0].revents) {
+            (void)accept_new_conn(fd2conn, fd);
+        }
     }
+    return 0;
 }

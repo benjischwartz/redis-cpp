@@ -1,12 +1,29 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <fcntl.h>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 
 const size_t k_max_msg = 4096;
+
+enum {
+    STATE_REQ = 0,
+    STATE_RES = 1,
+    STATE_END = 2,
+};
+
+struct Conn {
+    int fd = -1;
+    uint32_t state = 0;
+    size_t rbuf_size = 0;
+    uint8_t rbuf[4 + k_max_msg];
+    size_t wbuf_size = 0;
+    size_t wbuf_sent = 0;
+    uint8_t wbuf[4 + k_max_msg];
+};
 
 inline void die(const std::string &s) { std::cout << "Failure: " << s << "\n"; }
 
@@ -37,4 +54,20 @@ static int32_t write_all(int fd, const char *buf, size_t n)
         buf += rv;
     }
     return 0;
+}
+
+static void fd_set_nb(int fd) {
+    errno = 0;
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (errno) {
+        die("fcntl error");
+        return;
+    }
+
+    flags |= O_NONBLOCK;
+    errno = 0;
+    (void)fcntl(fd, F_SETFL, flags);
+    if (errno) {
+        die("fcntl error");
+    }
 }
