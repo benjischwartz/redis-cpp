@@ -25,7 +25,11 @@ struct Conn {
     uint8_t wbuf[4 + k_max_msg];
 };
 
-inline void die(const std::string &s) { std::cout << "Failure: " << s << "\n"; }
+inline void die(const char *msg) { 
+    int err = errno;
+    fprintf(stderr, "[%d] %s\n", err, msg);
+    abort();
+}
 
 static int32_t read_full(int fd, char *buf, size_t n)
 {

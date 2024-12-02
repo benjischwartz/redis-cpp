@@ -4,8 +4,7 @@
 
 #include "utils.h"
 
-static int32_t query(int fd, const char *text)
-{
+static int32_t send_req(int fd, const char *text) {
     uint32_t len = (uint32_t)strlen(text);
     if (len > k_max_msg) {
         return -1;
@@ -17,6 +16,9 @@ static int32_t query(int fd, const char *text)
     if (int32_t err = write_all(fd, wbuf, 4 + len)) {
         return err;
     }
+    return 0;
+}
+static int32_t read_res(int fd) {
     // 4 bytes header
     char rbuf[4 + k_max_msg + 1];
     errno = 0;
@@ -30,6 +32,7 @@ static int32_t query(int fd, const char *text)
         }
         return err;
     }
+    uint32_t len = 0;
     memcpy(&len, rbuf, 4);  // assume little endian
     if (len > k_max_msg) {
         die("too long");
@@ -61,17 +64,20 @@ int main()
 
     int rv = connect(fd, (const sockaddr *)&addr, sizeof(addr));
 
-    int32_t err = query(fd, "hello1");
-    if (err) {
-        goto L_DONE;
+    // multiple pipelined requests
+    const char *query_list[3] = {"hello1", "hello2", "hello3"};
+
+    for (size_t i = 0; i < 3; ++i) {
+        int32_t err = send_req(fd, query_list[i]);
+        if (err) {
+            goto L_DONE;
+        }
     }
-    err = query(fd, "hello2");
-    if (err) {
-        goto L_DONE;
-    }
-    err = query(fd, "hello3");
-    if (err) {
-        goto L_DONE;
+    for (size_t i = 0; i < 3; ++i) {
+        int32_t err = read_res(fd);
+        if (err) {
+            goto L_DONE;
+        }
     }
 
 L_DONE:
