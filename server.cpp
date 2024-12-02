@@ -7,6 +7,100 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+static void conn_put(std::vector<Conn *> &fd2conn, struct Conn *conn);
+static int32_t accept_new_conn(std::vector<Conn *> &fd2conn, int fd);
+static bool try_flush_buffer(Conn *conn);
+static void state_res(Conn *conn);
+static bool try_one_request(Conn *conn);
+static bool try_fill_buffer(Conn *conn);
+static void state_req(Conn *conn);
+static void connection_io(Conn *conn);
+
+int main()
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        die("socket()");
+    }
+
+    int val = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
+
+    // 0.0.0.0:1234
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = ntohs(1234);
+    addr.sin_addr.s_addr = ntohl(0);
+    int rv = bind(fd, (const sockaddr *)&addr, sizeof(addr));
+    if (rv) {
+        die("bind()");
+    }
+
+    // listen
+    rv = listen(fd, SOMAXCONN);  // backlog arg = size of queue
+    if (rv) {
+        die("listen()");
+    }
+
+    // Print out server's port
+    struct sockaddr_in a;
+    socklen_t len = sizeof(a);
+    getsockname(fd, (sockaddr *)&a, &len);
+    printf("Server address: %s.%d\n", inet_ntoa(a.sin_addr), htons(a.sin_port));
+
+    // map of client connections, keyed by fd
+    std::vector<Conn *> fd2conn;
+
+    // set listen fd to nonblocking mode
+    fd_set_nb(fd);
+
+    // the event loop
+    std::vector<struct pollfd> poll_args;
+    while (true) {
+        // reset arguments of poll()
+        poll_args.clear();
+        // listening fd is first
+        struct pollfd pfd = {fd, POLLIN, 0};
+        poll_args.push_back(pfd);
+        for (Conn *conn : fd2conn) {
+            if (!conn) {
+                continue;
+            }
+            // For each fd connection, create the relevant poll() arg
+            struct pollfd pfd = {};
+            pfd.fd = conn->fd;
+            pfd.events = (conn->state == STATE_REQ) ? POLLIN : POLLOUT;
+            pfd.events = pfd.events | POLLERR;
+            poll_args.push_back(pfd);
+        }
+        // poll for active fds 
+        int rv = poll(poll_args.data(), (nfds_t)poll_args.size(), 1000);
+        if (rv < 0) {
+            die("poll()");
+        }
+
+        // process active connections (skip the first listening fd)
+        for (size_t i = 1; i < poll_args.size(); ++i) {
+            if (poll_args[i].revents) {
+                Conn *conn = fd2conn[poll_args[i].fd];
+                connection_io(conn);
+                if (conn->state == STATE_END) {
+                    // client closed normally, or something bad
+                    // destroy connection
+                    fd2conn[conn->fd] = NULL;
+                    (void)close(conn->fd);
+                    free(conn);
+                }
+            }
+        }
+
+        if (poll_args[0].revents) {
+            (void)accept_new_conn(fd2conn, fd);
+        }
+    }
+    return 0;
+}
+
 static void conn_put(std::vector<Conn *> &fd2conn, struct Conn *conn) {
     if (fd2conn.size() <= (size_t)conn->fd) {
         fd2conn.resize(conn->fd + 1);
@@ -155,87 +249,3 @@ static void connection_io(Conn *conn) {
     }
 }
 
-int main()
-{
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        die("socket()");
-    }
-
-    int val = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
-
-    // 0.0.0.0:1234
-    struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_port = ntohs(1234);
-    addr.sin_addr.s_addr = ntohl(0);
-    int rv = bind(fd, (const sockaddr *)&addr, sizeof(addr));
-    if (rv) {
-        die("bind()");
-    }
-
-    // listen
-    rv = listen(fd, SOMAXCONN);  // backlog arg = size of queue
-    if (rv) {
-        die("listen()");
-    }
-
-    // Print out server's port
-    struct sockaddr_in a;
-    socklen_t len = sizeof(a);
-    getsockname(fd, (sockaddr *)&a, &len);
-    printf("Server address: %s.%d\n", inet_ntoa(a.sin_addr), htons(a.sin_port));
-
-    // map of client connections, keyed by fd
-    std::vector<Conn *> fd2conn;
-
-    // set listen fd to nonblocking mode
-    fd_set_nb(fd);
-
-    // the event loop
-    std::vector<struct pollfd> poll_args;
-    while (true) {
-        // reset arguments of poll()
-        poll_args.clear();
-        // listening fd is first
-        struct pollfd pfd = {fd, POLLIN, 0};
-        poll_args.push_back(pfd);
-        for (Conn *conn : fd2conn) {
-            if (!conn) {
-                continue;
-            }
-            // For each fd connection, create the relevant poll() arg
-            struct pollfd pfd = {};
-            pfd.fd = conn->fd;
-            pfd.events = (conn->state == STATE_REQ) ? POLLIN : POLLOUT;
-            pfd.events = pfd.events | POLLERR;
-            poll_args.push_back(pfd);
-        }
-        // poll for active fds 
-        int rv = poll(poll_args.data(), (nfds_t)poll_args.size(), 1000);
-        if (rv < 0) {
-            die("poll()");
-        }
-
-        // process active connections (skip the first listening fd)
-        for (size_t i = 1; i < poll_args.size(); ++i) {
-            if (poll_args[i].revents) {
-                Conn *conn = fd2conn[poll_args[i].fd];
-                connection_io(conn);
-                if (conn->state == STATE_END) {
-                    // client closed normally, or something bad
-                    // destroy connection
-                    fd2conn[conn->fd] = NULL;
-                    (void)close(conn->fd);
-                    free(conn);
-                }
-            }
-        }
-
-        if (poll_args[0].revents) {
-            (void)accept_new_conn(fd2conn, fd);
-        }
-    }
-    return 0;
-}
