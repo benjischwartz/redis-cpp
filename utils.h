@@ -10,8 +10,8 @@
 const size_t k_max_msg = 4096;
 
 enum {
-    STATE_REQ = 0,
-    STATE_RES = 1,
+    STATE_REQ = 0,  // For reading requests
+    STATE_RES = 1,  // For writing responses
     STATE_END = 2,
 };
 
