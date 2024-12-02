@@ -25,6 +25,10 @@ struct Conn {
     uint8_t wbuf[4 + k_max_msg];
 };
 
+inline void msg(const char *msg) { 
+    fprintf(stderr, "%s\n", msg);
+}
+
 inline void die(const char *msg) { 
     int err = errno;
     fprintf(stderr, "[%d] %s\n", err, msg);
