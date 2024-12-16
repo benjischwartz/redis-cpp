@@ -1,19 +1,20 @@
-#include "utils.h"
-
-#include <poll.h>
-#include <sys/event.h>
-#include <cstdint>
-#include <vector>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <sys/event.h>
 #include <sys/socket.h>
+
+#include <cstdint>
+#include <vector>
+
+#include "utils.h"
 
 static void connection_io(Conn *conn);
 static int32_t accept_new_conn(std::vector<Conn *> &fd2conn, int fd);
 static void conn_put(std::vector<Conn *> &fd2conn, struct Conn *conn);
 static bool try_flush_buffer(Conn *conn);
 static void state_res(Conn *conn);
-static bool try_one_request(Conn *conn);
+static bool try_one_request(Conn *conn, size_t &bytes_read);
 static bool try_fill_buffer(Conn *conn);
 static void state_req(Conn *conn);
 
@@ -74,7 +75,7 @@ int main()
             pfd.events = pfd.events | POLLERR;
             poll_args.push_back(pfd);
         }
-        // poll for active fds 
+        // poll for active fds
         int rv = poll(poll_args.data(), (nfds_t)poll_args.size(), 1000);
         if (rv < 0) {
             die("poll()");
@@ -102,7 +103,8 @@ int main()
     return 0;
 }
 
-static int32_t accept_new_conn(std::vector<Conn *> &fd2conn, int fd) {
+static int32_t accept_new_conn(std::vector<Conn *> &fd2conn, int fd)
+{
     // accept
     struct sockaddr_in client_addr = {};
     socklen_t socklen = sizeof(client_addr);
@@ -115,7 +117,7 @@ static int32_t accept_new_conn(std::vector<Conn *> &fd2conn, int fd) {
     // set new connection fd to non-blocking
     fd_set_nb(connfd);
 
-    // create Conn struct for new connection fd 
+    // create Conn struct for new connection fd
     struct Conn *conn = (struct Conn *)malloc(sizeof(struct Conn));
     if (!conn) {
         close(connfd);
@@ -130,32 +132,37 @@ static int32_t accept_new_conn(std::vector<Conn *> &fd2conn, int fd) {
     return 0;
 }
 
-static void conn_put(std::vector<Conn *> &fd2conn, struct Conn *conn) {
+static void conn_put(std::vector<Conn *> &fd2conn, struct Conn *conn)
+{
     if (fd2conn.size() <= (size_t)conn->fd) {
         fd2conn.resize(conn->fd + 1);
     }
     fd2conn[conn->fd] = conn;
 }
 
-static void connection_io(Conn *conn) {
+static void connection_io(Conn *conn)
+{
     if (conn->state == STATE_REQ) {
         state_req(conn);
     }
 }
 
-static void state_req(Conn *conn) {
-    while (try_fill_buffer(conn)) {}
+static void state_req(Conn *conn)
+{
+    while (try_fill_buffer(conn)) {
+    }
 }
 
-static bool try_fill_buffer(Conn *conn) {
-    // try to fill buffer 
+static bool try_fill_buffer(Conn *conn)
+{
+    // try to fill buffer
     assert(conn->rbuf_size < sizeof(conn->rbuf));
     ssize_t rv = 0;
     do {
         size_t cap = sizeof(conn->rbuf) - conn->rbuf_size;
         rv = read(conn->fd, &conn->rbuf[conn->rbuf_size], cap);
-    } 
-    while (rv < 0 && errno == EINTR);     // signal delivered before time limit expired
+    } while (rv < 0 &&
+             errno == EINTR);  // signal delivered before time limit expired
     if (rv < 0 && errno == EAGAIN) {
         // got EAGAIN, stop
         return false;
@@ -177,11 +184,22 @@ static bool try_fill_buffer(Conn *conn) {
     }
     conn->rbuf_size += (size_t)rv;
     assert(conn->rbuf_size <= sizeof(conn->rbuf));
-    while (try_one_request(conn)) {}
+    size_t bytes_read = 0;
+    while (try_one_request(conn, bytes_read)) {
+        std::cout << "bytes read: " << bytes_read << std::endl;
+    }
+    if (bytes_read) {
+        size_t remain = conn->rbuf_size - bytes_read;
+        if (remain) {
+            memmove(conn->rbuf, &conn->rbuf[bytes_read], remain);
+        }
+        conn->rbuf_size = remain;
+    }
     return (conn->state == STATE_REQ);
 }
 
-static bool try_one_request(Conn *conn) {
+static bool try_one_request(Conn *conn, size_t &bytes_read)
+{
     // try to parse a request from buffer
     if (conn->rbuf_size < 4) {
         // not enough data in buffer, retry on next iteration
@@ -206,12 +224,16 @@ static bool try_one_request(Conn *conn) {
     memcpy(&conn->wbuf[4], &conn->rbuf[4], len);
     conn->wbuf_size = 4 + len;
 
+    bytes_read += len + 4;
+
     // remove request from buffer
+    /*
     size_t remain = conn->rbuf_size - 4 - len;
     if (remain) {
         memmove(conn->rbuf, &conn->rbuf[4 + len], remain);
     }
     conn->rbuf_size = remain;
+    */
 
     // Change state
     conn->state = STATE_RES;
@@ -219,20 +241,21 @@ static bool try_one_request(Conn *conn) {
 
     // If request fully processed, continue outer loop
     return (conn->state == STATE_REQ);
-
 }
 
-static void state_res(Conn *conn) {
-    while (try_flush_buffer(conn)) {}
+static void state_res(Conn *conn)
+{
+    while (try_flush_buffer(conn)) {
+    }
 }
 
-static bool try_flush_buffer(Conn *conn) {
+static bool try_flush_buffer(Conn *conn)
+{
     ssize_t rv = 0;
     do {
         size_t remain = conn->wbuf_size - conn->wbuf_sent;
         rv = write(conn->fd, &conn->wbuf[conn->wbuf_sent], remain);
-    } 
-    while (rv < 0 && errno == EINTR);
+    } while (rv < 0 && errno == EINTR);
     if (rv < 0 && errno == EAGAIN) {
         // got EAGAIN, stop
         return false;
@@ -245,7 +268,7 @@ static bool try_flush_buffer(Conn *conn) {
     conn->wbuf_sent += (size_t)rv;
     assert(conn->wbuf_sent <= conn->wbuf_size);
     if (conn->wbuf_sent == conn->wbuf_size) {
-        // response fully sent, change state block 
+        // response fully sent, change state block
         conn->state = STATE_REQ;
         conn->wbuf_sent = 0;
         conn->wbuf_size = 0;
